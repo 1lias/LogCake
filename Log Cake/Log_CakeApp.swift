@@ -7,6 +7,12 @@ struct TimeEntry: Codable {
     let endTime: Date
 }
 
+// Add a new structure to store the current tracking state
+struct CurrentTrackingState: Codable {
+    let category: String
+    let startTime: Date
+}
+
 @main
 struct TimeTrackerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -18,11 +24,16 @@ struct TimeTrackerApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    // Power notification observer
+    var powerNotificationObserver: NSObjectProtocol?
+    
     var statusItem: NSStatusItem!
     var timer: Timer?
     var currentCategory: String?
     var startTime: Date?
     var timeEntries: [TimeEntry] = []
+    var dayBoundaryTimer: Timer?
+    var currentDay: Date?
     
     struct CategoryStyle {
         let name: String
@@ -37,6 +48,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     ]
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Set up sleep notification observer
+        powerNotificationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            print("Computer going to sleep - stopping time tracking")
+            self?.handleSleep()
+        }
+        
+        loadTimeEntriesFromFile()
+        loadCurrentTrackingState() // Load any ongoing tracking session
+        
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
@@ -48,9 +72,94 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Set up auto-save timer (every minute)
         Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.saveCurrentProgress(openFile: false)
+            self?.saveCurrentTrackingState() // Save current tracking state
+        }
+        
+        // If we loaded an active tracking session, start the timer
+        if currentCategory != nil && startTime != nil {
+            startLiveUpdates()
+            updateStatusBarIcon()
+        }
+    }
+
+    // Handle computer sleep
+    func handleSleep() {
+        if currentCategory != nil {
+            stopTracking()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Remove the observer when the app terminates
+        if let observer = powerNotificationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        
+        saveTimeEntriesToFile()
+        saveCurrentTrackingState()
+    }
+
+    func saveTimeEntriesToFile() {
+        exportEntries(timeEntries, openFile: false, asJSON: true)
+    }
+
+    func loadTimeEntriesFromFile() {
+        if let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let fileURL = containerURL.appendingPathComponent("timeEntries.json")
+            if let data = try? Data(contentsOf: fileURL) {
+                let decoder = JSONDecoder()
+                if let loadedEntries = try? decoder.decode([TimeEntry].self, from: data) {
+                    timeEntries = loadedEntries
+                }
+            }
+        }
+    }
+
+    // New method to save current tracking state
+    func saveCurrentTrackingState() {
+        guard let currentCategory = currentCategory,
+              let startTime = startTime else {
+            // If there's no active tracking, remove the state file
+            if let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                let stateURL = containerURL.appendingPathComponent("currentTracking.json")
+                try? FileManager.default.removeItem(at: stateURL)
+            }
+            return
+        }
+        
+        let currentState = CurrentTrackingState(category: currentCategory, startTime: startTime)
+        let encoder = JSONEncoder()
+        if let data = try? encoder.encode(currentState),
+           let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let stateURL = containerURL.appendingPathComponent("currentTracking.json")
+            try? data.write(to: stateURL)
         }
     }
     
+    // New method to load current tracking state
+    func loadCurrentTrackingState() {
+        guard let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return
+        }
+        
+        let stateURL = containerURL.appendingPathComponent("currentTracking.json")
+        guard let data = try? Data(contentsOf: stateURL),
+              let state = try? JSONDecoder().decode(CurrentTrackingState.self, from: data) else {
+            return
+        }
+        
+        // Only restore the state if it's from the same calendar day
+        let calendar = Calendar.current
+        if calendar.isDate(state.startTime, inSameDayAs: Date()) {
+            currentCategory = state.category
+            startTime = state.startTime
+            print("Restored tracking session: \(state.category) from \(state.startTime)")
+        } else {
+            // If it's a different day, clean up the state file
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+    }
+
     func createCategoryMenuItem(category: CategoryStyle) -> NSMenuItem {
         let item = NSMenuItem(title: category.name, action: #selector(toggleTracking(_:)), keyEquivalent: "")
         item.target = self
@@ -184,8 +293,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         startTime = nil
         timer?.invalidate()
         timer = nil
-        updateStatusBarIcon()  // Update the icon state
-        setupMenu()  // Refresh the menu
+        updateStatusBarIcon()
+        setupMenu()
+        
+        // Clear the tracking state file
+        saveCurrentTrackingState()
     }
     
     func updateStatusBarIcon() {
@@ -201,6 +313,66 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    func setupDayBoundaryCheck() {
+        // Store current day
+        currentDay = Calendar.current.startOfDay(for: Date())
+        
+        // Schedule timer to check for day changes every minute
+        dayBoundaryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.checkDayBoundary()
+        }
+        RunLoop.main.add(dayBoundaryTimer!, forMode: .common)
+    }
+
+    func checkDayBoundary() {
+        guard let currentDay = currentDay else { return }
+        
+        let now = Date()
+        let startOfToday = Calendar.current.startOfDay(for: now)
+        
+        // Check if we've crossed into a new day
+        if startOfToday > currentDay {
+            handleDayChange(previousDay: currentDay, newDay: startOfToday)
+        }
+    }
+
+    func handleDayChange(previousDay: Date, newDay: Date) {
+        print("Day changed from \(previousDay) to \(newDay)")
+        
+        // Export previous day's entries
+        let previousDayEntries = timeEntries.filter { entry in
+            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
+        }
+        
+        // Export the summary for the previous day
+        exportEntries(previousDayEntries, openFile: false, asJSON: false)
+        
+        // Remove previous day's entries
+        timeEntries.removeAll { entry in
+            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
+        }
+        
+        // Update current day
+        self.currentDay = newDay
+        
+        // If currently tracking, stop and start a new session
+        if let category = currentCategory {
+            stopTracking()
+            
+            // Start a new tracking session
+            currentCategory = category
+            startTime = Date()
+            updateStatusBarIcon()
+            startLiveUpdates()
+            setupMenu()
+            
+            print("Restarted tracking for new day: \(category)")
+        }
+        
+        // Save the cleaned up state
+        saveTimeEntriesToFile()
+    }
+    
     func saveCurrentProgress(openFile: Bool) {
         var entriesToExport = timeEntries
         
@@ -211,38 +383,57 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         exportEntries(entriesToExport, openFile: openFile)
     }
     
-    func exportEntries(_ entries: [TimeEntry], openFile: Bool) {
-        var summary = "Daily Time Tracking Summary\n"
-        summary += "=========================\n\n"
-        
-        let groupedEntries = Dictionary(grouping: entries) { $0.category }
-        
-        for category in categories {
-            let totalSeconds = (groupedEntries[category.name] ?? []).reduce(0) { acc, entry in
-                acc + Int(entry.endTime.timeIntervalSince(entry.startTime))
+    func exportEntries(_ entries: [TimeEntry], openFile: Bool, asJSON: Bool = false) {
+        if asJSON {
+            let encoder = JSONEncoder()
+            if let data = try? encoder.encode(entries) {
+                if let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    let fileURL = containerURL.appendingPathComponent("timeEntries.json")
+                    do {
+                        try data.write(to: fileURL)
+                        if openFile {
+                            NSWorkspace.shared.open(fileURL)
+                        }
+                        print("Saved entries to: \(fileURL.path)")
+                    } catch {
+                        print("Failed to save entries: \(error)")
+                    }
+                }
+            }
+        } else {
+            // Existing summary export logic
+            var summary = "Daily Time Tracking Summary\n"
+            summary += "=========================\n\n"
+            
+            let groupedEntries = Dictionary(grouping: entries) { $0.category }
+            
+            for category in categories {
+                let totalSeconds = (groupedEntries[category.name] ?? []).reduce(0) { acc, entry in
+                    acc + Int(entry.endTime.timeIntervalSince(entry.startTime))
+                }
+                
+                let hours = totalSeconds / 3600
+                let minutes = (totalSeconds % 3600) / 60
+                let seconds = totalSeconds % 60
+                
+                summary += "\(category.name): \(hours)h \(minutes)m \(seconds)s\n"
             }
             
-            let hours = totalSeconds / 3600
-            let minutes = (totalSeconds % 3600) / 60
-            let seconds = totalSeconds % 60
-            
-            summary += "\(category.name): \(hours)h \(minutes)m \(seconds)s\n"
-        }
-        
-        if let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateFormat = "yyyy-MM-dd"
-            let fileName = "time-tracking-\(dateFormatter.string(from: Date())).txt"
-            let fileURL = containerURL.appendingPathComponent(fileName)
-            
-            do {
-                try summary.write(to: fileURL, atomically: true, encoding: .utf8)
-                if openFile {
-                    NSWorkspace.shared.open(fileURL)
+            if let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateFormat = "yyyy-MM-dd"
+                let fileName = "time-tracking-\(dateFormatter.string(from: Date())).txt"
+                let fileURL = containerURL.appendingPathComponent(fileName)
+                
+                do {
+                    try summary.write(to: fileURL, atomically: true, encoding: .utf8)
+                    if openFile {
+                        NSWorkspace.shared.open(fileURL)
+                    }
+                    print("Saved summary to: \(fileURL.path)")
+                } catch {
+                    print("Failed to save summary: \(error)")
                 }
-                print("Saved summary to: \(fileURL.path)")
-            } catch {
-                print("Failed to save summary: \(error)")
             }
         }
     }
