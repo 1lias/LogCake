@@ -26,14 +26,13 @@ struct TimeTrackerApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     // Power notification observer
     var powerNotificationObserver: NSObjectProtocol?
-    
+    var dayBoundaryTimer: Timer?
+    var currentDay: Date?
     var statusItem: NSStatusItem!
     var timer: Timer?
     var currentCategory: String?
     var startTime: Date?
     var timeEntries: [TimeEntry] = []
-    var dayBoundaryTimer: Timer?
-    var currentDay: Date?
     
     struct CategoryStyle {
         let name: String
@@ -41,13 +40,78 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     let categories: [CategoryStyle] = [
-        CategoryStyle(name: "Work", color: NSColor.systemBlue),
-        CategoryStyle(name: "Creative", color: NSColor.systemPurple),
+        CategoryStyle(name: "Work", color: NSColor.systemIndigo),
+        CategoryStyle(name: "Creative", color: NSColor.systemPink),
         CategoryStyle(name: "Learning", color: NSColor.systemGreen),
-        CategoryStyle(name: "Break", color: NSColor.systemOrange)
+        CategoryStyle(name: "Break", color: NSColor.systemYellow)
     ]
     
+    func setupDayBoundaryCheck() {
+        // Store current day
+        currentDay = Calendar.current.startOfDay(for: Date())
+        
+        // Schedule timer to check for day changes every minute
+        dayBoundaryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.checkDayBoundary()
+        }
+        RunLoop.main.add(dayBoundaryTimer!, forMode: .common)
+    }
+    
+    func checkDayBoundary() {
+        guard let currentDay = currentDay else { return }
+        
+        let now = Date()
+        let startOfToday = Calendar.current.startOfDay(for: now)
+        
+        // Check if we've crossed into a new day
+        if startOfToday > currentDay {
+            handleDayChange(previousDay: currentDay, newDay: startOfToday)
+        }
+    }
+    
+    func handleDayChange(previousDay: Date, newDay: Date) {
+        print("Day changed from \(previousDay) to \(newDay)")
+        
+        // Export previous day's entries
+        let previousDayEntries = timeEntries.filter { entry in
+            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
+        }
+        
+        // Export the summary for the previous day
+        exportEntries(previousDayEntries, openFile: false, asJSON: false)
+        
+        // Remove previous day's entries
+        timeEntries.removeAll { entry in
+            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
+        }
+        
+        // Update current day
+        self.currentDay = newDay
+        
+        // If currently tracking, stop and start a new session
+        if let category = currentCategory {
+            stopTracking()
+            
+            // Start a new tracking session
+            currentCategory = category
+            startTime = Date()
+            updateStatusBarIcon()
+            startLiveUpdates()
+            setupMenu()
+            
+            print("Restarted tracking for new day: \(category)")
+        }
+        
+        // Save the cleaned up state
+        saveTimeEntriesToFile()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Initialize day boundary checking
+        setupDayBoundaryCheck()
+        // Initialize day boundary checking
+        setupDayBoundaryCheck()
+        
         // Set up sleep notification observer
         powerNotificationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
@@ -57,7 +121,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("Computer going to sleep - stopping time tracking")
             self?.handleSleep()
         }
-        
         loadTimeEntriesFromFile()
         loadCurrentTrackingState() // Load any ongoing tracking session
         
@@ -80,23 +143,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             startLiveUpdates()
             updateStatusBarIcon()
         }
-    }
-
-    // Handle computer sleep
-    func handleSleep() {
-        if currentCategory != nil {
-            stopTracking()
-        }
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        // Remove the observer when the app terminates
-        if let observer = powerNotificationObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(observer)
-        }
-        
-        saveTimeEntriesToFile()
-        saveCurrentTrackingState()
     }
 
     func saveTimeEntriesToFile() {
@@ -158,6 +204,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // If it's a different day, clean up the state file
             try? FileManager.default.removeItem(at: stateURL)
         }
+    }
+
+    // Handle computer sleep
+    func handleSleep() {
+        if currentCategory != nil {
+            stopTracking()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Remove the observer when the app terminates
+        if let observer = powerNotificationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        saveTimeEntriesToFile()
+        saveCurrentTrackingState()
     }
 
     func createCategoryMenuItem(category: CategoryStyle) -> NSMenuItem {
@@ -311,66 +373,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 button.title = ""
             }
         }
-    }
-    
-    func setupDayBoundaryCheck() {
-        // Store current day
-        currentDay = Calendar.current.startOfDay(for: Date())
-        
-        // Schedule timer to check for day changes every minute
-        dayBoundaryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.checkDayBoundary()
-        }
-        RunLoop.main.add(dayBoundaryTimer!, forMode: .common)
-    }
-
-    func checkDayBoundary() {
-        guard let currentDay = currentDay else { return }
-        
-        let now = Date()
-        let startOfToday = Calendar.current.startOfDay(for: now)
-        
-        // Check if we've crossed into a new day
-        if startOfToday > currentDay {
-            handleDayChange(previousDay: currentDay, newDay: startOfToday)
-        }
-    }
-
-    func handleDayChange(previousDay: Date, newDay: Date) {
-        print("Day changed from \(previousDay) to \(newDay)")
-        
-        // Export previous day's entries
-        let previousDayEntries = timeEntries.filter { entry in
-            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
-        }
-        
-        // Export the summary for the previous day
-        exportEntries(previousDayEntries, openFile: false, asJSON: false)
-        
-        // Remove previous day's entries
-        timeEntries.removeAll { entry in
-            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
-        }
-        
-        // Update current day
-        self.currentDay = newDay
-        
-        // If currently tracking, stop and start a new session
-        if let category = currentCategory {
-            stopTracking()
-            
-            // Start a new tracking session
-            currentCategory = category
-            startTime = Date()
-            updateStatusBarIcon()
-            startLiveUpdates()
-            setupMenu()
-            
-            print("Restarted tracking for new day: \(category)")
-        }
-        
-        // Save the cleaned up state
-        saveTimeEntriesToFile()
     }
     
     func saveCurrentProgress(openFile: Bool) {
