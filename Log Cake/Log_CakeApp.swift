@@ -222,8 +222,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         saveCurrentTrackingState()
     }
 
-    func createCategoryMenuItem(category: CategoryStyle) -> NSMenuItem {
-        let item = NSMenuItem(title: category.name, action: #selector(toggleTracking(_:)), keyEquivalent: "")
+    func createCategoryMenuItem(category: CategoryStyle, index: Int) -> NSMenuItem {
+        // Convert index to string for shortcut (1-based indexing)
+        let shortcut = String(index + 1)
+        let item = NSMenuItem(title: category.name, action: #selector(toggleTracking(_:)), keyEquivalent: shortcut)
+        item.keyEquivalentModifierMask = .command
         item.target = self
         
         // Create the circle indicator
@@ -266,8 +269,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         // Add category items
-        for category in categories {
-            menu.addItem(createCategoryMenuItem(category: category))
+        for (index, category) in categories.enumerated() {
+            menu.addItem(createCategoryMenuItem(category: category, index: index))
         }
         
         menu.addItem(NSMenuItem.separator())
@@ -404,10 +407,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             // Existing summary export logic
-            var summary = "Daily Time Tracking Summary\n"
-            summary += "=========================\n\n"
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "MMMM d, yyyy"
+            let currentDate = dateFormatter.string(from: Date())
+            
+            var summary = "✦ time slice ✦\n"
+            summary += "\(currentDate)\n"
+            summary += "────────────────\n\n"
             
             let groupedEntries = Dictionary(grouping: entries) { $0.category }
+            var totalActiveSeconds = 0
+            let categoryNameWidth = categories.map { $0.name.count }.max() ?? 0
             
             for category in categories {
                 let totalSeconds = (groupedEntries[category.name] ?? []).reduce(0) { acc, entry in
@@ -418,8 +428,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let minutes = (totalSeconds % 3600) / 60
                 let seconds = totalSeconds % 60
                 
-                summary += "\(category.name): \(hours)h \(minutes)m \(seconds)s\n"
+                // Pad category name for alignment
+                let paddedName = category.name.padding(toLength: categoryNameWidth, withPad: " ", startingAt: 0)
+                summary += "\(paddedName): \(String(format: "%2dh %2dm %2ds", hours, minutes, seconds))\n"
+                
+                // Add to total active time if not a break
+                if category.name != "Break" {
+                    totalActiveSeconds += totalSeconds
+                }
             }
+            
+            // Add total active time
+            let totalActiveHours = totalActiveSeconds / 3600
+            let totalActiveMinutes = (totalActiveSeconds % 3600) / 60
+            let remainingSeconds = totalActiveSeconds % 60  // Changed variable name here
+            
+            summary += "\n────────────────\n"
+            let totalLabel = "Total Active"
+            let paddedTotal = totalLabel.padding(toLength: categoryNameWidth, withPad: " ", startingAt: 0)
+            summary += "\(paddedTotal): \(String(format: "%2dh %2dm %2ds", totalActiveHours, totalActiveMinutes, remainingSeconds))\n"
             
             if let containerURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
                 let dateFormatter = DateFormatter()
