@@ -74,7 +74,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Export previous day's entries
         let previousDayEntries = timeEntries.filter { entry in
-            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
+            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay) ||
+            Calendar.current.isDate(entry.endTime, inSameDayAs: previousDay)
         }
         
         // Export the summary for the previous day
@@ -82,7 +83,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Remove previous day's entries
         timeEntries.removeAll { entry in
-            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay)
+            Calendar.current.isDate(entry.startTime, inSameDayAs: previousDay) ||
+            Calendar.current.isDate(entry.endTime, inSameDayAs: previousDay)
         }
         
         // Update current day
@@ -155,7 +157,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if let data = try? Data(contentsOf: fileURL) {
                 let decoder = JSONDecoder()
                 if let loadedEntries = try? decoder.decode([TimeEntry].self, from: data) {
-                    timeEntries = loadedEntries
+                    // Only load entries from today
+                    let calendar = Calendar.current
+                    let today = calendar.startOfDay(for: Date())
+                    timeEntries = loadedEntries.filter { entry in
+                        calendar.isDate(entry.startTime, inSameDayAs: today)
+                    }
                 }
             }
         }
@@ -411,7 +418,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             dateFormatter.dateFormat = "MMMM d, yyyy"
             let currentDate = dateFormatter.string(from: Date())
             
-            var summary = "✦ time slice ✦\n"
+            var summary = "✦ Time Slice ✦\n"
             summary += "\(currentDate)\n"
             summary += "────────────────\n\n"
             
